@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block Placer</title>
+<link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<style>
+  :root {
+    --bg: #15161a;
+    --panel: #1f2127;
+    --wall: #6f6f6f;
+    --wall-hi: #9a9a9a;
+    --wall-lo: #444;
+    --well: #000;
+    --text: #e8e8ea;
+    --muted: #9a9ca3;
+    --accent: #00cfd5;
+    --cell: 28px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 16px;
+  }
+  main { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: 0.04em; }
+  .stats { display: flex; gap: 22px; font-size: 15px; color: var(--muted); }
+  .stats b { color: var(--text); font-variant-numeric: tabular-nums; font-size: 18px; margin-left: 4px; }
+
+  /* Board with a bevelled grey wall like the reference image */
+  .frame {
+    padding: calc(var(--cell) * 0.5);
+    background: var(--wall);
+    border: 3px solid;
+    border-color: var(--wall-hi) var(--wall-lo) var(--wall-lo) var(--wall-hi);
+    position: relative;
+  }
+  #board {
+    display: grid;
+    grid-template-columns: repeat(10, var(--cell));
+    grid-template-rows: repeat(20, var(--cell));
+    background: var(--well);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .cell { width: var(--cell); height: var(--cell); }
+  .block {
+    border: 3px solid;
+    border-color: rgba(255,255,255,0.45) rgba(0,0,0,0.35) rgba(0,0,0,0.45) rgba(255,255,255,0.3);
+  }
+  .ghost-ok { opacity: 0.45; }
+  .ghost-bad { background: rgba(255, 60, 60, 0.35) !important; border: 1px dashed #ff5a5a; }
+  .clearing { animation: flash 0.25s ease-out; }
+  @keyframes flash { 0% { filter: brightness(3); } 100% { filter: brightness(1); } }
+
+  .c-I { background: #00cfd5; }
+  .c-O { background: #d8d000; }
+  .c-T { background: #9b00c8; }
+  .c-S { background: #00c800; }
+  .c-Z { background: #d40000; }
+  .c-J { background: #0010d8; }
+  .c-L { background: #d86c00; }
+
+  .tray { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; width: 100%; max-width: 420px; }
+  .slot {
+    background: var(--panel);
+    border: 2px solid #2c2f37;
+    border-radius: 8px;
+    padding: 8px 4px 6px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    min-height: 120px;
+  }
+  .slot.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,207,213,0.25); }
+  .slot.dead { opacity: 0.35; }
+  .slot .preview { flex: 1; display: grid; place-items: center; min-height: 72px; }
+  .mini { display: grid; gap: 0; }
+  .mini .cell { width: 16px; height: 16px; }
+  .mini .block { border-width: 2px; }
+  .slot button { font-size: 12px; }
+
+  button {
+    background: #2c2f37; color: var(--text);
+    border: 1px solid #3c404a; border-radius: 6px;
+    padding: 5px 10px; cursor: pointer; font: inherit;
+  }
+  button:hover { background: #363a44; }
+  .controls { display: flex; gap: 10px; }
+  .help { color: var(--muted); font-size: 13px; text-align: center; max-width: 420px; line-height: 1.5; }
+
+  .overlay {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: none; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    text-align: center;
+  }
+  .overlay.show { display: flex; }
+  .overlay h2 { margin: 0; font-size: 26px; }
+
+  @media (max-width: 420px) {
+    :root { --cell: 22px; }
+    .mini .cell { width: 12px; height: 12px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>BLOCK PLACER</h1>
+  <div class="stats">
+    <span>Moves<b id="moves">0</b></span>
+    <span>Lines<b id="lines">0</b></span>
+    <span>Best<b id="best">–</b></span>
+  </div>
+
+  <div class="frame">
+    <div id="board"></div>
+    <div class="overlay" id="over">
+      <h2>Game Over</h2>
+      <div id="overText"></div>
+      <button id="again">Play again</button>
+    </div>
+  </div>
+
+  <div class="tray" id="tray"></div>
+
+  <div class="controls">
+    <button id="rotate">Rotate (R)</button>
+    <button id="newGame">New game</button>
+  </div>
+  <p class="help">
+    Pick a piece below (or press 1–4), rotate it with <b>R</b>, right-click, or the mouse wheel,
+    then click on the board to place it. Full rows clear and everything above drops down.
+    The game ends when none of your pieces fit anywhere.
+  </p>
+</main>
+
+<script>
+const COLS = 10, ROWS = 20, TRAY_SIZE = 4;
+
+// The seven tetrominoes from the reference image, as [row, col] cells.
+const SHAPES = {
+  I: [[0,0],[0,1],[0,2],[0,3]],
+  O: [[0,0],[0,1],[1,0],[1,1]],
+  T: [[0,0],[0,1],[0,2],[1,1]],
+  S: [[0,1],[0,2],[1,0],[1,1]],
+  Z: [[0,0],[0,1],[1,1],[1,2]],
+  J: [[0,0],[1,0],[1,1],[1,2]],
+  L: [[0,2],[1,0],[1,1],[1,2]],
+};
+const TYPES = Object.keys(SHAPES);
+
+function normalize(cells) {
+  const minR = Math.min(...cells.map(c => c[0]));
+  const minC = Math.min(...cells.map(c => c[1]));
+  return cells.map(([r, c]) => [r - minR, c - minC]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+}
+
+// Rotate 90° clockwise: (r, c) -> (c, -r), then shift back to the origin.
+function rotate(cells) {
+  return normalize(cells.map(([r, c]) => [c, -r]));
+}
+
+function dims(cells) {
+  return {
+    h: Math.max(...cells.map(c => c[0])) + 1,
+    w: Math.max(...cells.map(c => c[1])) + 1,
+  };
+}
+
+// All distinct orientations of a shape (O has 1, I/S/Z have 2, others 4).
+function orientations(cells) {
+  const out = [];
+  let cur = normalize(cells);
+  for (let i = 0; i < 4; i++) {
+    const key = JSON.stringify(cur);
+    if (!out.some(o => JSON.stringify(o) === key)) out.push(cur);
+    cur = rotate(cur);
+  }
+  return out;
+}
+
+const state = {
+  grid: [],        // grid[r][c] = type letter or null
+  tray: [],        // { type, cells }
+  selected: null,  // tray index, or null when nothing is selected
+  moves: 0,
+  lines: 0,
+  over: false,
+  hover: null,     // { r, c } cell under pointer
+};
+
+const boardEl = document.getElementById('board');
+const trayEl = document.getElementById('tray');
+const movesEl = document.getElementById('moves');
+const linesEl = document.getElementById('lines');
+const bestEl = document.getElementById('best');
+const overEl = document.getElementById('over');
+const overTextEl = document.getElementById('overText');
+
+// Build the board cells once; render() just updates classes.
+const cellEls = [];
+for (let r = 0; r < ROWS; r++) {
+  cellEls.push([]);
+  for (let c = 0; c < COLS; c++) {
+    const d = document.createElement('div');
+    d.className = 'cell';
+    d.dataset.r = r;
+    d.dataset.c = c;
+    boardEl.appendChild(d);
+    cellEls[r].push(d);
+  }
+}
+
+function randomPiece() {
+  const type = TYPES[Math.floor(Math.random() * TYPES.length)];
+  return { type, cells: normalize(SHAPES[type]) };
+}
+
+function fits(cells, top, left) {
+  for (const [r, c] of cells) {
+    const rr = top + r, cc = left + c;
+    if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) return false;
+    if (state.grid[rr][cc]) return false;
+  }
+  return true;
+}
+
+function canPlaceAnywhere(piece) {
+  for (const cells of orientations(piece.cells)) {
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        if (fits(cells, r, c)) return true;
+  }
+  return false;
+}
+
+// Top-left placement for the selected piece so the pointer sits near its centre.
+function anchorFor(piece, hover) {
+  const { h, w } = dims(piece.cells);
+  return { top: hover.r - Math.floor((h - 1) / 2), left: hover.c - Math.floor((w - 1) / 2) };
+}
+
+function clearFullRows() {
+  const full = [];
+  for (let r = 0; r < ROWS; r++)
+    if (state.grid[r].every(Boolean)) full.push(r);
+  if (!full.length) return [];
+  const kept = state.grid.filter((_, r) => !full.includes(r));
+  while (kept.length < ROWS) kept.unshift(Array(COLS).fill(null));
+  state.grid = kept;
+  return full;
+}
+
+function place() {
+  if (state.over || !state.hover) return;
+  const piece = state.tray[state.selected];
+  if (!piece) return;
+  const { top, left } = anchorFor(piece, state.hover);
+  if (!fits(piece.cells, top, left)) return;
+
+  for (const [r, c] of piece.cells) state.grid[top + r][left + c] = piece.type;
+  state.moves++;
+
+  const cleared = clearFullRows();
+  state.lines += cleared.length;
+
+  state.tray[state.selected] = randomPiece();
+  state.selected = null;
+  render();
+  if (cleared.length) flashRows(cleared);
+  checkGameOver();
+}
+
+function flashRows(rows) {
+  // After the drop, the cleared rows' slots are filled by what fell into them;
+  // flash the bottom-most region that changed so the clear is visible.
+  const lowest = Math.max(...rows);
+  for (let r = 0; r <= lowest; r++)
+    for (const el of cellEls[r]) {
+      el.classList.remove('clearing');
+      void el.offsetWidth;
+      el.classList.add('clearing');
+    }
+}
+
+function checkGameOver() {
+  const anyFits = state.tray.some(canPlaceAnywhere);
+  renderTray();
+  if (anyFits) return;
+  state.over = true;
+  const best = loadBest();
+  const isBest = best === null || state.moves > best;
+  if (isBest) saveBest(state.moves);
+  overTextEl.textContent = `${state.moves} moves · ${state.lines} lines` + (isBest ? ' — new best!' : '');
+  overEl.classList.add('show');
+  renderStats();
+}
+
+function rotateSelected() {
+  if (state.over) return;
+  const p = state.tray[state.selected];
+  if (!p) return;
+  p.cells = rotate(p.cells);
+  render();
+}
+
+function select(i) {
+  if (state.over || i < 0 || i >= TRAY_SIZE) return;
+  state.selected = i;
+  render();
+}
+
+function render() {
+  renderBoard();
+  renderTray();
+  renderStats();
+}
+
+function renderBoard() {
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
+      const t = state.grid[r][c];
+      cellEls[r][c].className = 'cell' + (t ? ` block c-${t}` : '');
+    }
+
+  const piece = state.tray[state.selected];
+  if (state.over || !state.hover || !piece) return;
+  const { top, left } = anchorFor(piece, state.hover);
+  const ok = fits(piece.cells, top, left);
+  for (const [r, c] of piece.cells) {
+    const rr = top + r, cc = left + c;
+    if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) continue;
+    const el = cellEls[rr][cc];
+    if (ok) el.className = `cell block c-${piece.type} ghost-ok`;
+    else el.classList.add('ghost-bad');
+  }
+}
+
+function miniGrid(piece) {
+  const { h, w } = dims(piece.cells);
+  const g = document.createElement('div');
+  g.className = 'mini';
+  g.style.gridTemplateColumns = `repeat(${w}, auto)`;
+  const filled = new Set(piece.cells.map(([r, c]) => `${r},${c}`));
+  for (let r = 0; r < h; r++)
+    for (let c = 0; c < w; c++) {
+      const d = document.createElement('div');
+      d.className = 'cell' + (filled.has(`${r},${c}`) ? ` block c-${piece.type}` : '');
+      g.appendChild(d);
+    }
+  return g;
+}
+
+function renderTray() {
+  trayEl.innerHTML = '';
+  state.tray.forEach((piece, i) => {
+    const slot = document.createElement('div');
+    slot.className = 'slot' + (i === state.selected ? ' selected' : '');
+    if (!canPlaceAnywhere(piece)) slot.classList.add('dead');
+    slot.title = `Piece ${i + 1}`;
+
+    const prev = document.createElement('div');
+    prev.className = 'preview';
+    prev.appendChild(miniGrid(piece));
+    slot.appendChild(prev);
+
+    const btn = document.createElement('button');
+    btn.textContent = '⟳ Rotate';
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      state.selected = i;
+      rotateSelected();
+    });
+    slot.appendChild(btn);
+
+    slot.addEventListener('click', () => select(i));
+    trayEl.appendChild(slot);
+  });
+}
+
+function renderStats() {
+  movesEl.textContent = state.moves;
+  linesEl.textContent = state.lines;
+  const best = loadBest();
+  bestEl.textContent = best === null ? '–' : best;
+}
+
+function loadBest() {
+  try {
+    const v = localStorage.getItem('blockPlacer.bestMoves');
+    return v === null ? null : Number(v);
+  } catch { return null; }
+}
+
+function saveBest(n) {
+  try { localStorage.setItem('blockPlacer.bestMoves', String(n)); } catch {}
+}
+
+function newGame() {
+  state.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  state.tray = Array.from({ length: TRAY_SIZE }, randomPiece);
+  state.selected = null;
+  state.moves = 0;
+  state.lines = 0;
+  state.over = false;
+  state.hover = null;
+  overEl.classList.remove('show');
+  render();
+}
+
+function cellFromEvent(e) {
+  const rect = boardEl.getBoundingClientRect();
+  const size = rect.width / COLS;
+  const c = Math.floor((e.clientX - rect.left) / size);
+  const r = Math.floor((e.clientY - rect.top) / size);
+  if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return null;
+  return { r, c };
+}
+
+boardEl.addEventListener('pointermove', e => {
+  const cell = cellFromEvent(e);
+  if (cell && state.hover && cell.r === state.hover.r && cell.c === state.hover.c) return;
+  state.hover = cell;
+  renderBoard();
+});
+boardEl.addEventListener('pointerleave', e => {
+  if (e.pointerType === 'mouse') { state.hover = null; renderBoard(); }
+});
+boardEl.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  state.hover = cellFromEvent(e);
+  // On touch, the first tap previews the position; a second tap on the same cell places.
+  if (e.pointerType !== 'mouse' && boardEl.dataset.lastTap !== `${state.hover?.r},${state.hover?.c}`) {
+    boardEl.dataset.lastTap = `${state.hover?.r},${state.hover?.c}`;
+    renderBoard();
+    return;
+  }
+  boardEl.dataset.lastTap = '';
+  place();
+});
+boardEl.addEventListener('contextmenu', e => { e.preventDefault(); rotateSelected(); });
+boardEl.addEventListener('wheel', e => { e.preventDefault(); rotateSelected(); }, { passive: false });
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R' || e.key === ' ') { e.preventDefault(); rotateSelected(); }
+  else if (e.key >= '1' && e.key <= '4') select(Number(e.key) - 1);
+});
+
+document.getElementById('rotate').addEventListener('click', rotateSelected);
+document.getElementById('newGame').addEventListener('click', newGame);
+document.getElementById('again').addEventListener('click', newGame);
+
+newGame();
+</script>
+</body>
+</html>
