@@ -1,4 +1,4 @@
 # block-placer
-Block Placer is a game where you place blocks in  field
+Block Placer is a game where you place blocks in a field
 
 **Play it here:** https://smartybryan.github.io/block-placer/
