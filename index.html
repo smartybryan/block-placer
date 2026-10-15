@@ -77,10 +77,25 @@
     border-radius: 8px;
     padding: 8px 4px 6px;
     display: flex; flex-direction: column; align-items: center; gap: 6px;
-    cursor: pointer;
+    cursor: grab;
     user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;
     min-height: 120px;
   }
+  .slot.dragging .preview { opacity: 0.25; }
+
+  /* The piece that follows the pointer while dragging from the tray */
+  #floater {
+    position: fixed; left: 0; top: 0;
+    display: none;
+    pointer-events: none;
+    z-index: 10;
+    filter: drop-shadow(0 6px 10px rgba(0,0,0,0.6));
+  }
+  #floater.show { display: grid; }
+  #floater .cell:not(.block) { visibility: hidden; }
   .slot.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,207,213,0.25); }
   .slot.dead { opacity: 0.35; }
   .slot .preview { flex: 1; display: grid; place-items: center; min-height: 72px; }
@@ -93,6 +108,7 @@
     background: #2c2f37; color: var(--text);
     border: 1px solid #3c404a; border-radius: 6px;
     padding: 5px 10px; cursor: pointer; font: inherit;
+    touch-action: manipulation;
   }
   button:hover { background: #363a44; }
   .controls { display: flex; gap: 10px; }
@@ -138,11 +154,14 @@
     <button id="newGame">New game</button>
   </div>
   <p class="help">
-    Pick a piece below (or press 1–4), rotate it with <b>R</b>, right-click, or the mouse wheel,
-    then click on the board to place it. Full rows clear and everything above drops down.
+    Drag a piece from the tray onto the board and let go to place it.
+    Tap a piece to select it, tap it again (or press <b>R</b>) to rotate.
+    With a mouse you can also select a piece (or press 1–4), rotate with right-click or the wheel,
+    and click the board to place it. Full rows clear and everything above drops down.
     The game ends when none of your pieces fit anywhere.
   </p>
 </main>
+<div id="floater"></div>
 
 <script>
 const COLS = 10, ROWS = 20, TRAY_SIZE = 4;
@@ -189,6 +208,12 @@ function orientations(cells) {
   return out;
 }
 
+// How far above the finger a dragged piece floats on touch screens, in cells,
+// so the finger never hides it.
+const TOUCH_LIFT = 2;
+// Pointer travel (px) before a press on a tray piece counts as a drag rather than a tap.
+const DRAG_THRESHOLD = 6;
+
 const state = {
   grid: [],        // grid[r][c] = type letter or null
   tray: [],        // { type, cells }
@@ -196,11 +221,13 @@ const state = {
   moves: 0,
   lines: 0,
   over: false,
-  hover: null,     // { r, c } cell under pointer
+  hover: null,     // { r, c } cell under the mouse when not dragging
+  drag: null,      // active drag from the tray, see startDrag
 };
 
 const boardEl = document.getElementById('board');
 const trayEl = document.getElementById('tray');
+const floaterEl = document.getElementById('floater');
 const movesEl = document.getElementById('moves');
 const linesEl = document.getElementById('lines');
 const bestEl = document.getElementById('best');
@@ -214,8 +241,6 @@ for (let r = 0; r < ROWS; r++) {
   for (let c = 0; c < COLS; c++) {
     const d = document.createElement('div');
     d.className = 'cell';
-    d.dataset.r = r;
-    d.dataset.c = c;
     boardEl.appendChild(d);
     cellEls[r].push(d);
   }
@@ -244,10 +269,17 @@ function canPlaceAnywhere(piece) {
   return false;
 }
 
-// Top-left placement for the selected piece so the pointer sits near its centre.
+// Top-left placement for a piece so the mouse sits near its centre.
 function anchorFor(piece, hover) {
   const { h, w } = dims(piece.cells);
   return { top: hover.r - Math.floor((h - 1) / 2), left: hover.c - Math.floor((w - 1) / 2) };
+}
+
+// Where the selected piece would land right now, or null.
+function currentTarget() {
+  if (state.drag) return state.drag.moved ? state.drag.target : null;
+  const piece = state.tray[state.selected];
+  return piece && state.hover ? anchorFor(piece, state.hover) : null;
 }
 
 function clearFullRows() {
@@ -261,11 +293,11 @@ function clearFullRows() {
   return full;
 }
 
-function place() {
-  if (state.over || !state.hover) return;
+function place(target) {
+  if (state.over || !target) return;
   const piece = state.tray[state.selected];
   if (!piece) return;
-  const { top, left } = anchorFor(piece, state.hover);
+  const { top, left } = target;
   if (!fits(piece.cells, top, left)) return;
 
   for (const [r, c] of piece.cells) state.grid[top + r][left + c] = piece.type;
@@ -311,7 +343,9 @@ function rotateSelected() {
   const p = state.tray[state.selected];
   if (!p) return;
   p.cells = rotate(p.cells);
-  render();
+  renderTray();
+  if (state.drag?.moved) updateDrag(state.drag.x, state.drag.y);
+  else renderBoard();
 }
 
 function select(i) {
@@ -334,8 +368,9 @@ function renderBoard() {
     }
 
   const piece = state.tray[state.selected];
-  if (state.over || !state.hover || !piece) return;
-  const { top, left } = anchorFor(piece, state.hover);
+  const target = currentTarget();
+  if (state.over || !target || !piece) return;
+  const { top, left } = target;
   const ok = fits(piece.cells, top, left);
   for (const [r, c] of piece.cells) {
     const rr = top + r, cc = left + c;
@@ -346,16 +381,17 @@ function renderBoard() {
   }
 }
 
-function miniGrid(piece) {
+// Fill `g` with a grid drawing of the piece; `size` (px) overrides the CSS cell size.
+function drawPiece(g, piece, size) {
   const { h, w } = dims(piece.cells);
-  const g = document.createElement('div');
-  g.className = 'mini';
+  g.innerHTML = '';
   g.style.gridTemplateColumns = `repeat(${w}, auto)`;
   const filled = new Set(piece.cells.map(([r, c]) => `${r},${c}`));
   for (let r = 0; r < h; r++)
     for (let c = 0; c < w; c++) {
       const d = document.createElement('div');
       d.className = 'cell' + (filled.has(`${r},${c}`) ? ` block c-${piece.type}` : '');
+      if (size) { d.style.width = `${size}px`; d.style.height = `${size}px`; }
       g.appendChild(d);
     }
   return g;
@@ -365,25 +401,32 @@ function renderTray() {
   trayEl.innerHTML = '';
   state.tray.forEach((piece, i) => {
     const slot = document.createElement('div');
-    slot.className = 'slot' + (i === state.selected ? ' selected' : '');
+    slot.className = 'slot';
+    if (i === state.selected) slot.classList.add('selected');
+    if (state.drag?.moved && state.drag.index === i) slot.classList.add('dragging');
     if (!canPlaceAnywhere(piece)) slot.classList.add('dead');
     slot.title = `Piece ${i + 1}`;
 
     const prev = document.createElement('div');
     prev.className = 'preview';
-    prev.appendChild(miniGrid(piece));
+    const mini = document.createElement('div');
+    mini.className = 'mini';
+    prev.appendChild(drawPiece(mini, piece));
     slot.appendChild(prev);
 
     const btn = document.createElement('button');
     btn.textContent = '⟳ Rotate';
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
+    btn.addEventListener('click', () => {
       state.selected = i;
       rotateSelected();
     });
     slot.appendChild(btn);
 
-    slot.addEventListener('click', () => select(i));
+    slot.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || e.target.closest('button')) return;
+      e.preventDefault();
+      startDrag(i, e);
+    });
     trayEl.appendChild(slot);
   });
 }
@@ -414,9 +457,98 @@ function newGame() {
   state.lines = 0;
   state.over = false;
   state.hover = null;
+  endDrag();
   overEl.classList.remove('show');
   render();
 }
+
+// --- Dragging pieces from the tray -------------------------------------------
+
+function startDrag(i, e) {
+  if (state.over) return;
+  state.drag = {
+    index: i,
+    pointerId: e.pointerId,
+    touch: e.pointerType !== 'mouse',
+    startX: e.clientX,
+    startY: e.clientY,
+    x: e.clientX,
+    y: e.clientY,
+    moved: false,  // false until the pointer passes DRAG_THRESHOLD; a release before that is a tap
+    target: null,  // { top, left } board placement under the floating piece
+  };
+}
+
+// Move the floating piece to follow the pointer and snap it to the board.
+function updateDrag(x, y) {
+  const d = state.drag;
+  d.x = x;
+  d.y = y;
+  const piece = state.tray[d.index];
+  const rect = boardEl.getBoundingClientRect();
+  const size = rect.width / COLS;
+  const { h, w } = dims(piece.cells);
+
+  drawPiece(floaterEl, piece, size);
+  const left = x - (w * size) / 2;
+  const top = d.touch ? y - h * size - TOUCH_LIFT * size : y - (h * size) / 2;
+  floaterEl.style.transform = `translate(${left}px, ${top}px)`;
+
+  // Only target the board while the middle of the piece is over it.
+  const cx = left + (w * size) / 2, cy = top + (h * size) / 2;
+  const overBoard = cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
+  d.target = overBoard
+    ? { top: Math.round((top - rect.top) / size), left: Math.round((left - rect.left) / size) }
+    : null;
+  renderBoard();
+}
+
+function endDrag() {
+  state.drag = null;
+  floaterEl.classList.remove('show');
+  for (const slot of trayEl.children) slot.classList.remove('dragging');
+}
+
+document.addEventListener('pointermove', e => {
+  const d = state.drag;
+  if (!d || e.pointerId !== d.pointerId) return;
+  if (!d.moved) {
+    if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < DRAG_THRESHOLD) return;
+    d.moved = true;
+    state.selected = d.index;
+    state.hover = null;
+    // Toggle classes rather than rebuilding the tray mid-gesture.
+    [...trayEl.children].forEach((slot, i) => {
+      slot.classList.toggle('selected', i === d.index);
+      slot.classList.toggle('dragging', i === d.index);
+    });
+    floaterEl.classList.add('show');
+  }
+  updateDrag(e.clientX, e.clientY);
+});
+
+document.addEventListener('pointerup', e => {
+  const d = state.drag;
+  if (!d || e.pointerId !== d.pointerId) return;
+  endDrag();
+  if (d.moved) {
+    // Dropping off the board, or where the piece doesn't fit, just cancels.
+    if (d.target) place(d.target);
+    renderBoard();
+  } else if (state.selected === d.index) {
+    rotateSelected();
+  } else {
+    select(d.index);
+  }
+});
+
+document.addEventListener('pointercancel', e => {
+  if (!state.drag || e.pointerId !== state.drag.pointerId) return;
+  endDrag();
+  renderBoard();
+});
+
+// --- Mouse play directly on the board ----------------------------------------
 
 function cellFromEvent(e) {
   const rect = boardEl.getBoundingClientRect();
@@ -428,31 +560,28 @@ function cellFromEvent(e) {
 }
 
 boardEl.addEventListener('pointermove', e => {
+  if (e.pointerType !== 'mouse' || state.drag) return;
   const cell = cellFromEvent(e);
   if (cell && state.hover && cell.r === state.hover.r && cell.c === state.hover.c) return;
   state.hover = cell;
   renderBoard();
 });
 boardEl.addEventListener('pointerleave', e => {
-  if (e.pointerType === 'mouse') { state.hover = null; renderBoard(); }
+  if (e.pointerType !== 'mouse' || state.drag) return;
+  state.hover = null;
+  renderBoard();
 });
 boardEl.addEventListener('pointerdown', e => {
-  if (e.button !== 0) return;
+  if (e.pointerType !== 'mouse' || e.button !== 0 || state.drag) return;
   state.hover = cellFromEvent(e);
-  // On touch, the first tap previews the position; a second tap on the same cell places.
-  if (e.pointerType !== 'mouse' && boardEl.dataset.lastTap !== `${state.hover?.r},${state.hover?.c}`) {
-    boardEl.dataset.lastTap = `${state.hover?.r},${state.hover?.c}`;
-    renderBoard();
-    return;
-  }
-  boardEl.dataset.lastTap = '';
-  place();
+  place(currentTarget());
 });
 boardEl.addEventListener('contextmenu', e => { e.preventDefault(); rotateSelected(); });
 boardEl.addEventListener('wheel', e => { e.preventDefault(); rotateSelected(); }, { passive: false });
 
 document.addEventListener('keydown', e => {
   if (e.key === 'r' || e.key === 'R' || e.key === ' ') { e.preventDefault(); rotateSelected(); }
+  else if (e.key === 'Escape' && state.drag) { endDrag(); renderBoard(); }
   else if (e.key >= '1' && e.key <= '4') select(Number(e.key) - 1);
 });
 
